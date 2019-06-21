@@ -87,7 +87,7 @@ func Merge(ops Ops) Ops {
 			last = ops[o]
 		}
 		switch {
-		case last.S != "" && op.N == 0:
+		case last.N == 0 && last.S != "" && op.N == 0:
 			op.S = last.S + op.S
 			l--
 		case last.N < 0 && op.N < 0, last.N > 0 && op.N > 0:
@@ -132,7 +132,7 @@ func Compose(a, b Ops) (ab Ops, err error) {
 	reta, _, ins := a.Count()
 	retb, del, _ := b.Count()
 	if reta+ins != retb+del {
-		err = fmt.Errorf("Compose requires consecutive ops.")
+		err = fmt.Errorf("compose requires consecutive ops")
 		return
 	}
 	ia, oa := getop(0, a)
@@ -149,7 +149,7 @@ func Compose(a, b Ops) (ab Ops, err error) {
 			continue
 		}
 		if oa == noop || ob == noop {
-			err = fmt.Errorf("Compose encountered a short operation sequence.")
+			err = fmt.Errorf("compose encountered a short operation sequence")
 			return
 		}
 		switch {
@@ -228,7 +228,7 @@ func Transform(a, b Ops) (a1, b1 Ops, err error) {
 	reta, dela, _ := a.Count()
 	retb, delb, _ := b.Count()
 	if reta+dela != retb+delb {
-		err = fmt.Errorf("Transform requires concurrent ops.")
+		err = fmt.Errorf("transform requires concurrent ops")
 		return
 	}
 	ia, oa := getop(0, a)
@@ -250,7 +250,7 @@ func Transform(a, b Ops) (a1, b1 Ops, err error) {
 			continue
 		}
 		if oa == noop || ob == noop {
-			err = fmt.Errorf("Transform encountered a short operation sequence.")
+			err = fmt.Errorf("transform encountered a short operation sequence")
 			return
 		}
 		switch {
@@ -316,7 +316,7 @@ func Transform(a, b Ops) (a1, b1 Ops, err error) {
 			}
 			b1 = append(b1, om)
 		default:
-			err = fmt.Errorf("Transform failed with incompatible operation sequences.")
+			err = fmt.Errorf("transform failed with incompatible operation sequences")
 			return
 		}
 	}

@@ -4,107 +4,53 @@
 
 package ot
 
-import (
-	"testing"
-)
+import "testing"
+
+func TestDocPos(t *testing.T) {
+	doc := NewDocFromStr("abc")
+	off := doc.Pos(3, Zero)
+	if !off.Valid() {
+		t.Error("eof is not valid")
+	}
+}
 
 func TestDocApply(t *testing.T) {
-	doc := Doc("abc")
-	if err := doc.Apply(Ops{{N: 1}, {S: "tag"}, {N: -2}}); err != nil {
-		t.Error(err)
+	tests := []struct {
+		text string
+		want string
+		ops  Ops
+	}{
+		{"abc", "atag", Ops{
+			{N: 1},
+			{S: "tag"},
+			{N: -2},
+		}},
+		{"abc\ndef", "\nabc\ndef", Ops{
+			{S: "\n"},
+			{N: 7},
+		}},
+		{"abc\ndef\nghi", "abcghi", Ops{
+			{N: 3},
+			{N: -5},
+			{N: 3},
+		}},
+		{"abc\ndef\nghi", "ahoi", Ops{
+			{N: 1},
+			{N: -3},
+			{S: "h"},
+			{N: -4},
+			{S: "o"},
+			{N: -2},
+			{N: 1},
+		}},
 	}
-	if got := string(doc); got != "atag" {
-		t.Errorf("expected atag got %s", got)
-	}
-}
-
-func TestServer(t *testing.T) {
-	s := &Server{Doc("abc"), nil}
-	_, err := s.Recv(1, Ops{})
-	if err == nil || s.Rev() != 0 {
-		t.Error("expected error")
-	}
-	a := Ops{{N: 1}, {S: "tag"}, {N: 2}}
-	a1, err := s.Recv(0, a)
-	if err != nil || s.Rev() != 1 {
-		t.Error(err)
-	}
-	if !a1.Equal(a) {
-		t.Errorf("expected %v got %v", a, a1)
-	}
-	b1, err := s.Recv(0, Ops{{N: 1}, {N: -2}})
-	if err != nil || s.Rev() != 2 {
-		t.Error(err)
-	}
-	if !b1.Equal(Ops{{N: 4}, {N: -2}}) {
-		t.Errorf("expected %v got %v", a, a1)
-	}
-}
-
-func TestClient(t *testing.T) {
-	var sent []Ops
-	c := &Client{Doc: Doc("old!"), Send: func(rev int, ops Ops) {
-		sent = append(sent, ops)
-	}}
-	a := Ops{{S: "g"}, {N: 4}}
-	err := c.Apply(a)
-	if err != nil {
-		t.Error(err)
-	}
-	if s := string(c.Doc); s != "gold!" {
-		t.Errorf(`expected  "gold!" got %q`, s)
-	}
-	if !a.Equal(c.Wait) || !a.Equal(sent[0]) {
-		t.Error("expected waiting for ack")
-	}
-	b := Ops{{N: 2}, {N: -2}, {N: 1}}
-	err = c.Apply(b)
-	if err != nil {
-		t.Error(err)
-	}
-	if s := string(c.Doc); s != "go!" {
-		t.Errorf(`expected  "go!" got %q`, s)
-	}
-	if !b.Equal(c.Buf) || len(sent) != 1 {
-		t.Error("expected buffering")
-	}
-	err = c.Apply(Ops{{N: 2}, {S: " cool"}, {N: 1}})
-	if err != nil {
-		t.Error(err)
-	}
-	if s := string(c.Doc); s != "go cool!" {
-		t.Errorf(`expected  "go cool!" got %q`, s)
-	}
-	cb := Ops{{N: 2}, {N: -2}, {S: " cool"}, {N: 1}}
-	if !cb.Equal(c.Buf) || len(sent) != 1 {
-		t.Error("expected combinig buffer")
-	}
-	err = c.Recv(Ops{{N: 1}, {S: " is"}, {N: 3}})
-	if err != nil {
-		t.Error(err)
-	}
-	if s := string(c.Doc); s != "go is cool!" {
-		t.Errorf(`expected  "go is cool!" got %q`, s)
-	}
-	if !c.Wait.Equal(Ops{{S: "g"}, {N: 7}}) {
-		t.Error("expected transform wait", c.Wait)
-	}
-	cb = Ops{{N: 5}, {N: -2}, {S: " cool"}, {N: 1}}
-	if !c.Buf.Equal(cb) {
-		t.Error("expected transform buf", c.Buf)
-	}
-	err = c.Ack()
-	if err != nil {
-		t.Error(err)
-	}
-	if c.Buf != nil || !cb.Equal(c.Wait) || len(sent) != 2 || !cb.Equal(sent[1]) {
-		t.Error("expected flushing buffer")
-	}
-	err = c.Ack()
-	if err != nil {
-		t.Error(err)
-	}
-	if c.Buf != nil || c.Wait != nil || len(sent) != 2 {
-		t.Error("expected flushed")
+	for i, test := range tests {
+		doc := NewDocFromStr(test.text)
+		if err := doc.Apply(test.ops); err != nil {
+			t.Errorf("test %d error: %s", i, err)
+		}
+		if got := doc.String(); got != test.want {
+			t.Errorf("test %d want %q got %q", i, test.want, got)
+		}
 	}
 }

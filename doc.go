@@ -5,146 +5,210 @@
 package ot
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
+	"io"
+	"unicode/utf8"
 )
 
-// Doc represents a utf8-text document.
-type Doc []rune
+var Zero Pos
+
+type Pos struct {
+	Index  int
+	Line   int
+	Offset int
+}
+
+func (p Pos) Valid() bool {
+	return p.Line >= 0 && p.Offset >= 0
+}
+
+// Doc represents a utf8-text document as lines of runes.
+// All lines en in an implicit trailing newline.
+type Doc struct {
+	Lines [][]rune
+	Size  int
+}
+
+func NewDoc(r io.Reader) (*Doc, error) {
+	br := bufio.NewReader(r)
+	var d Doc
+	var err error
+	for err == nil {
+		var data []byte
+		data, err = br.ReadSlice('\n')
+		if err == nil {
+			d.Size += 1
+			data = data[:len(data)-1]
+		}
+		line := make([]rune, 0, utf8.RuneCount(data))
+		for len(data) > 0 {
+			r, rl := utf8.DecodeRune(data)
+			if r == utf8.RuneError {
+				return nil, fmt.Errorf("invalid rune in at %d:%d",
+					len(d.Lines), len(line))
+			}
+			data = data[rl:]
+			line = append(line, r)
+		}
+		d.Size += len(line)
+		d.Lines = append(d.Lines, line)
+	}
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return &d, nil
+}
+
+func NewDocFromStr(s string) *Doc {
+	var d Doc
+	var b int
+	for i, r := range s {
+		d.Size++
+		if r == '\n' {
+			d.Lines = append(d.Lines, []rune(s[b:i]))
+			b = i + 1
+		}
+	}
+	d.Lines = append(d.Lines, []rune(s[b:]))
+	return &d
+}
+
+func (doc *Doc) Pos(index int, last Pos) Pos {
+	n := index - last.Index + last.Offset
+	for i, l := range doc.Lines[last.Line:] {
+		if len(l) >= n {
+			return Pos{index, i + last.Line, n}
+		}
+		n -= len(l) + 1
+	}
+	return Pos{index, -1, -1}
+}
+
+type posop struct {
+	Pos
+	Op
+}
 
 // Apply applies the operation sequence ops to the document.
 // An error is returned if applying ops failed.
 func (doc *Doc) Apply(ops Ops) error {
-	i, buf := 0, *doc
-	ret, del, ins := ops.Count()
-	if ret+del != len(buf) {
-		return fmt.Errorf("The base length must be equal to the document length %d != %d", ret+del, len(buf))
-	}
-	if max := ret + del + ins; max > cap(buf) {
-		buf = make([]rune, len(buf), max+(max>>2))
-		copy(buf, *doc)
-	}
+	d := doc.Lines
+	p, pops := Zero, make([]posop, 0, len(ops))
 	for _, op := range ops {
 		switch {
 		case op.N > 0:
-			i += op.N
+			p = doc.Pos(p.Index+op.N, p)
+			if !p.Valid() {
+				return fmt.Errorf("invalid document index %d", p.Index)
+			}
 		case op.N < 0:
-			copy(buf[i:], buf[i-op.N:])
-			buf = buf[:len(buf)+op.N]
+			pops = append(pops, posop{p, op})
+			p = doc.Pos(p.Index-op.N, p)
+			if !p.Valid() {
+				return fmt.Errorf("invalid document index %d", p.Index)
+			}
 		case op.S != "":
-			opr, l := []rune(op.S), len(buf)
-			buf = buf[:l+len(opr)]
-			copy(buf[i+len(opr):], buf[i:l])
-			copy(buf[i:], opr)
-			i += len(opr)
+			pops = append(pops, posop{p, op})
 		}
 	}
-	*doc = buf
-	if i != ret+ins {
-		panic("Operation didn't operate on the whole document")
+	if p.Line != len(d)-1 || p.Offset != len(d[p.Line]) {
+		return fmt.Errorf("operation didn't operate on the whole document")
 	}
+	for i := len(pops) - 1; i >= 0; i-- {
+		pop := pops[i]
+		switch {
+		case pop.N < 0:
+			doc.Size += pop.N
+			end := doc.Pos(pop.Index-pop.N, pop.Pos)
+			if !end.Valid() {
+				return fmt.Errorf("invalid document index %d", end.Index)
+			}
+			line := d[pop.Line]
+			if pop.Line == end.Line {
+				rest := line[end.Offset:]
+				d[pop.Line] = append(line[:pop.Offset], rest...)
+				break
+			}
+			rest := d[end.Line][end.Offset:]
+			d[pop.Line] = append(line[:pop.Offset], rest...)
+			d = append(d[:pop.Line+1], d[end.Line+1:]...)
+		case pop.S != "":
+			insd := NewDocFromStr(pop.S)
+			doc.Size += insd.Size
+			insl := insd.Lines
+			line := d[pop.Line]
+			last := len(insl) - 1
+			insl[last] = append(insl[last], line[pop.Offset:]...)
+			insl[0] = append(line[:pop.Offset], insl[0]...)
+			if len(insl) == 1 {
+				d[pop.Line] = insl[0]
+				break
+			}
+			need := len(d) + len(insl) - 1
+			if cap(d) < need {
+				nd := make([][]rune, len(d), need)
+				copy(nd, d)
+				d = nd
+			}
+			d = d[:need]
+			copy(d[pop.Line+len(insl):], d[pop.Line+1:])
+			copy(d[pop.Line:], insl)
+		}
+	}
+	doc.Lines = d
 	return nil
 }
 
-// Server represents shared document with revision history.
-type Server struct {
-	Doc     Doc
-	History []Ops
+func (doc Doc) Extract(from, to int) *Doc {
+	off := doc.Pos(from, Zero)
+	end := doc.Pos(to, off)
+	if off.Line == end.Line {
+		return &Doc{Lines: [][]rune{
+			doc.Lines[off.Line][off.Offset:end.Offset],
+		}}
+	}
+	nd := make([][]rune, 0, 1+end.Line-off.Line)
+	nd = append(nd, doc.Lines[off.Line][off.Offset:])
+	for i := off.Line + 1; i < end.Line; i++ {
+		nd = append(nd, doc.Lines[i])
+	}
+	nd = append(nd, doc.Lines[end.Line][:end.Offset])
+	return &Doc{nd, to - from}
 }
 
-// Recv transforms, applies, and returns client ops and its revision.
-// An error is returned if the ops could not be applied.
-// Sending the derived ops to connected clients is the caller's responsibility.
-func (s *Server) Recv(rev int, ops Ops) (Ops, error) {
-	if rev < 0 || len(s.History) < rev {
-		return nil, fmt.Errorf("Revision not in history")
+func (doc Doc) WriteTo(w io.Writer) (nn int64, err error) {
+	rw, ok := w.(runeWriter)
+	if !ok {
+		rw = bufio.NewWriter(w)
 	}
-	var err error
-	// transform ops against all operations that happened since rev
-	for _, other := range s.History[rev:] {
-		if ops, _, err = Transform(ops, other); err != nil {
-			return nil, err
+	var n int
+	for i, l := range doc.Lines {
+		if i > 0 {
+			n, err = rw.WriteRune('\n')
+			nn += int64(n)
+			if err != nil {
+				return
+			}
+		}
+		for _, r := range l {
+			n, err = rw.WriteRune(r)
+			nn += int64(n)
+			if err != nil {
+				return
+			}
 		}
 	}
-	// apply to document
-	if err = s.Doc.Apply(ops); err != nil {
-		return nil, err
-	}
-	s.History = append(s.History, ops)
-	return ops, nil
+	return
 }
 
-func (s *Server) Rev() int {
-	return len(s.History)
+func (doc Doc) String() string {
+	var buf bytes.Buffer
+	doc.WriteTo(&buf)
+	return buf.String()
 }
 
-// Client represent a client document with synchronization mechanisms.
-// The client has three states:
-//    1. A synchronized client sends applied ops immediately and …
-//    2. waits for an acknowledgement from the server, meanwhile buffering applied ops.
-//    3. The buffer is composed with new ops and sent immediately when the pending ack arrives.
-type Client struct {
-	Doc  Doc // the document
-	Rev  int // last acknowledged revision
-	Wait Ops // pending ops or nil
-	Buf  Ops // buffered ops or nil
-	// Send is called when a new revision can be sent to the server.
-	Send func(rev int, ops Ops)
-}
-
-// Apply applies ops to the document and buffers or sends the server update.
-// An error is returned if the ops could not be applied.
-func (c *Client) Apply(ops Ops) error {
-	var err error
-	if err = c.Doc.Apply(ops); err != nil {
-		return err
-	}
-	switch {
-	case c.Buf != nil:
-		if c.Buf, err = Compose(c.Buf, ops); err != nil {
-			return err
-		}
-	case c.Wait != nil:
-		c.Buf = ops
-	default:
-		c.Wait = ops
-		c.Send(c.Rev, ops)
-	}
-	return nil
-}
-
-// Ack acknowledges a pending server update and sends buffered updates if any.
-// An error is returned if no update is pending.
-func (c *Client) Ack() error {
-	switch {
-	case c.Buf != nil:
-		c.Send(c.Rev+1, c.Buf)
-		c.Wait, c.Buf = c.Buf, nil
-	case c.Wait != nil:
-		c.Wait = nil
-	default:
-		return fmt.Errorf("no pending operation")
-	}
-	c.Rev++
-	return nil
-}
-
-// Recv receives server updates originating from other participants.
-// An error is returned if the server update could not be applied.
-func (c *Client) Recv(ops Ops) error {
-	var err error
-	if c.Wait != nil {
-		if ops, c.Wait, err = Transform(ops, c.Wait); err != nil {
-			return err
-		}
-	}
-	if c.Buf != nil {
-		if ops, c.Buf, err = Transform(ops, c.Buf); err != nil {
-			return err
-		}
-	}
-	if err = c.Doc.Apply(ops); err != nil {
-		return err
-	}
-	c.Rev++
-	return nil
+type runeWriter interface {
+	WriteRune(rune) (int, error)
 }
