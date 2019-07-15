@@ -3,7 +3,7 @@ ot
 
 ot is a minimal operational-transformation library for colaborative editing.
 
-It was extracted from my long abondoned https://github.com/mb0/lab project and modified to operate
+It was extracted from my long abandoned https://github.com/mb0/lab project and modified to operate
 on slices of unicode runes. The original code was based on
 https://github.com/Operational-Transformation/ot.js by Tim Baumann (MIT License).
 
